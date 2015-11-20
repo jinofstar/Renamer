@@ -1,44 +1,51 @@
 package com.jinofstar;
 
 import java.io.*;
+import java.rmi.server.ExportException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.logging.FileHandler;
 
 public class Renamer {
     final int blockingQueueSize = 100;
 
     final ThreadPoolExecutor executor;
-    final ThreadPoolExecutor renameExecutor;
+    ImageRenamer imageRenamer;
+    DeleteFilenameFilter deleteFilenameFilter;
 
     public Renamer() {
-        this.executor = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(blockingQueueSize));
-        this.renameExecutor = new ThreadPoolExecutor(4, 10, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(blockingQueueSize));
+        executor = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(blockingQueueSize));
+        imageRenamer = new ImageRenamer();
+
+        deleteFilenameFilter = new DeleteFilenameFilter();
+        deleteFilenameFilter.addExtension("txt");
+        deleteFilenameFilter.addExtension("db");
+        deleteFilenameFilter.hiddenFile(true);
     }
 
     public void run(String path) {
-        String fullPath = getFullPath(path);
+        String fullPath = Utils.getFileFullPath(path);
+        if (fullPath == null) {
+            return;
+        }
+
         System.out.println("Full path : " + fullPath);
-
-        recursive(path);
+        executor.execute(new TraverseTask(path));
     }
 
-    private void recursive(String path) {
-        this.executor.execute(new RecursiveTask(path));
-    }
-
-    class RecursiveTask implements Runnable {
+    class TraverseTask implements Runnable {
         final String path;
-        String suffix;
-        String prefix;
 
-        public RecursiveTask(String path) {
+        public TraverseTask(String path) {
             this.path = path;
+
+            System.out.println("new TraverseTask");
         }
 
         @Override
         public void run() {
-            System.out.println(">>>> start recursive <<<<");
+            System.out.println(">>>> start <<<<");
             System.out.println("path : " + path);
 
             File rootFile = new File(path);
@@ -47,14 +54,64 @@ public class Renamer {
                 return;
             }
 
-            removeFilesIfNeeded(rootFile);
-            renameFiles(rootFile);
+            if (!rootFile.isDirectory()) {
+                System.out.println(path + " is not directory!");
+                return;
+            }
 
-            System.out.println(">>>> end recursive <<<<");
+            new Item(rootFile).run();
         }
 
-        private void renameFiles(File rootFile) {
-            File[] files = rootFile.listFiles();
+        class Item {
+            int count = 0;
+            File rootFile;
+
+            public Item(File file) {
+                this.rootFile = file;
+            }
+
+            public void run() {
+                removeFilesIfNeeded();
+
+                File[] files = rootFile.listFiles(fileFilter);
+                if (files == null) {
+                    System.out.println(rootFile.getName() + " is empty folder!");
+                    return;
+                }
+
+                for (int i = 0; i < files.length; i++) {
+                    File file = files[i];
+
+                    if (file.isDirectory()) {
+                        new Item(file).run();
+                    } else {
+                        System.out.println("Rename File : " + file.getName());
+
+                        String newFileName = String.format(format, ++count, Utils.getFileExtension(file.getName()).toLowerCase());
+                        imageRenamer.offer(new RenameItem(file, newFileName));
+                    }
+                }
+            }
+
+            private void removeFilesIfNeeded() {
+                File[] files = rootFile.listFiles(deleteFilenameFilter);
+                if (files == null) {
+                    System.out.println(rootFile.getName() + " is empty folder!");
+                    return;
+                }
+
+                for (File file : files) {
+                    System.out.println("delete file : " + file.getAbsolutePath());
+                    file.delete();
+                }
+            }
+
+        }
+
+        private void traverse(File rootFile) {
+            removeFilesIfNeeded(rootFile);
+
+            File[] files = rootFile.listFiles(fileFilter);
             if (files == null) {
                 System.out.println(rootFile.getName() + " is empty folder!");
                 return;
@@ -62,55 +119,45 @@ public class Renamer {
 
             int count = 0;
 
-            int digits = Utils.numberOfDigits(files.length);
-            if (digits < 2) {
-                digits = 2;
-            }
-
-            this.suffix = " %0" + digits + "d";
-            this.prefix = rootFile.getName();
+            String suffix = getSuffix(files.length);
+            String format = getFileFormat(rootFile.getName(), suffix);
 
             for (int i = 0; i < files.length; i++) {
                 File file = files[i];
 
-                if (file.isHidden()) {
-                    System.out.println("delete hidden file : " + file.getName());
-                    file.delete();
-                } if (file.isDirectory()) {
-                    recursive(file.toString());
+                if (file.isDirectory()) {
+                    traverse(file);
                 } else {
-                    System.out.println("file : " + file.getName());
+                    System.out.println("Rename File : " + file.getName());
 
-                    renameFile(file, ++count);
-
-                    renameExecutor.execute(new RenameTask(file));
+                    String newFileName = String.format(format, ++count, Utils.getFileExtension(file.getName()).toLowerCase());
+                    imageRenamer.offer(new RenameItem(file, newFileName));
                 }
             }
+
+            System.out.println(">>>> end <<<<");
         }
 
-        private void renameFile(File file, int count) {
-            StringBuilder stringBuilder = new StringBuilder();
-
-            stringBuilder.append(prefix)
-                    .append(String.format(suffix, count))
-                    .append(".")
-                    .append(Utils.getFileExtension(file.getName()).toLowerCase());
-
-            String newFileName = stringBuilder.toString();
-
-            if (!file.getName().equals(newFileName)) {
-                File newFile = new File(file.getParentFile(), newFileName);
-                System.out.println("new file : " + newFile.getName());
-                file.renameTo(newFile);
+        public String getSuffix(int count) {
+            int digits = Utils.numberOfDigits(count);
+            if (digits < 2) {
+                digits = 2;
             }
+
+            StringBuilder format = new StringBuilder();
+            format.append("%0").append(digits).append("d");
+            return format.toString();
+        }
+
+        public String getFileFormat(String prefix, String suffix) {
+            StringBuilder format = new StringBuilder();
+            format.append(prefix).append(" ").append(suffix).append(".%s");
+
+            return format.toString();
         }
 
         private void removeFilesIfNeeded(File rootFile) {
-            DeleteFilenameFilter filenameFilter = new DeleteFilenameFilter();
-            filenameFilter.addExtension("txt");
-            filenameFilter.addExtension("db");
-
-            File[] files = rootFile.listFiles(filenameFilter);
+            File[] files = rootFile.listFiles(deleteFilenameFilter);
             if (files == null) {
                 System.out.println(rootFile.getName() + " is empty folder!");
                 return;
@@ -123,16 +170,39 @@ public class Renamer {
         }
     }
 
+    //
+    FileFilter fileFilter = new FileFilter() {
+        @Override
+        public boolean accept(File pathname) {
+            if (pathname.isDirectory()) {
+                return true;
+            }
+
+            try {
+                if (Utils.isZipFile(pathname)) {
+                    return true;
+                }
+            } catch (Exception e) {
+            }
+
+            return false;
+        }
+    };
+
+    // internal
     public class DeleteFilenameFilter implements FilenameFilter {
         List<String> extList = new ArrayList<>();
+        boolean hiddenFile = false;
 
         public DeleteFilenameFilter() {
-            extList.add("txt");
-            extList.add("db");
         }
 
         public void addExtension(String ext) {
             extList.add(ext);
+        }
+
+        public void hiddenFile(boolean enable) {
+            hiddenFile = enable;
         }
 
         @Override
@@ -143,71 +213,11 @@ public class Renamer {
                 }
             }
 
-            return name.startsWith(".");
-        }
-    }
-
-    class RenameTask implements Runnable {
-        final File file;
-
-        public RenameTask(File file) {
-            this.file = file;
-        }
-
-        @Override
-        public void run() {
-            System.out.println("start rename : " + file.toString());
-
-            try {
-                if (isZipFile(file)) {
-                    // for image
-                    System.out.println("rename : " + file.toString());
-                    file.createNewFile();
-                } else {
-
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }
-    }
-
-    private boolean isZipFile(File file) throws IOException {
-        int retry = 0;
-        int MAX_RETRY = 5;
-
-        while(!file.canRead()) {
-            ++retry;
-
-            try {
-                file.wait(1000L);
-            } catch (Exception e) {
+            if (hiddenFile) {
+                return name.startsWith(".");
             }
 
-            if (retry > MAX_RETRY) {
-                throw new IOException("Cannot read file " + file.getAbsolutePath());
-            }
-        }
-
-        if (file.length() < 4) {
             return false;
         }
-
-        DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(file)));
-        int test = in.readInt();
-        in.close();
-        return test == 0x504b0304;
-    }
-
-    private String getFullPath(String path) {
-        String fullPath = "";
-
-        try {
-            fullPath = new File(path).getCanonicalPath();
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-
-        return fullPath;
     }
 }

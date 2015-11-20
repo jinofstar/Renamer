@@ -3,12 +3,11 @@ package com.jinofstar;
 import java.io.File;
 
 public class RenameItem {
-    public RenameItem(String filepath) {
-        File[] files = new File(filepath).listFiles();
+    File file;
+    String fileName;
 
-        if (files == null) {
-            System.out.println(filepath + " is empty folder!");
-            return;
-        }
+    public RenameItem(File file, String fileName) {
+        this.file = file;
+        this.fileName = fileName;
     }
 }
